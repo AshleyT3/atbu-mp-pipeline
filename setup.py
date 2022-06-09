@@ -23,7 +23,7 @@ long_description = (this_directory / "README.md").read_text()
 
 setuptools.setup(
     name="atbu-mp-pipeline-pkg",
-    version="0.0.1",
+    version="0.0.2",
     author="Ashley R. Thomas",
     author_email="ashley.r.thomas.701@gmail.com",
     description= (
@@ -43,7 +43,7 @@ setuptools.setup(
         "Operating System :: OS Independent",
     ],
     package_dir={"": "src"},
-    packages=setuptools.find_packages(where="src"),
+    packages=setuptools.find_namespace_packages(where="src"),
     python_requires=">=3.9",
     install_requires=[
         "atbu-common-pkg >= 0.0.1",
