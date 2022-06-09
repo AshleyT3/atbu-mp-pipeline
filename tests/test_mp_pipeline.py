@@ -13,22 +13,17 @@
 # limitations under the License.
 
 # pylint: disable=unused-argument
-# pylint: disable=unused-variable
-# pylint: disable=unused-import
 
-from cmath import exp
 from concurrent.futures import Future, ProcessPoolExecutor
 import os
 from pathlib import Path
 import logging
 from random import randint
 import time
-from pytest import LogCaptureFixture, CaptureFixture, fail
 import pytest
-from atbu.common.exception import PipeConnectionAlreadyEof
+from atbu.mp_pipeline.exception import PipeConnectionAlreadyEof
 
-
-from atbu.common.mp_pipeline import (
+from atbu.mp_pipeline.mp_pipeline import (
     MultiprocessingPipeline,
     PipeConnectionIO,
     PipelineStage,

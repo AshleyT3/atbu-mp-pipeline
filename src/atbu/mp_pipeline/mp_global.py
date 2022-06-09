@@ -11,6 +11,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+r"""Global queued logging used by parent and subprocesses.
+"""
 
 import os
 import sys
@@ -19,10 +21,14 @@ import logging.handlers
 import multiprocessing
 import threading
 
+
+from atbu.common.exception import (
+    QueueListenerNotStarted,
+    QueueListenerAlreadyStarted,
+)
+
 from .exception import (
     GlobalContextNotSet,
-    QueueListenerAlreadyStarted,
-    QueueListenerNotStarted,
 )
 
 
@@ -46,7 +52,11 @@ class ProcessThreadContextMixin:
     def get_exec_context_log_stamp_str(self):
         current_process = self.our_process
         current_thread = self.our_thread
-        return f"PID={os.getpid()} TID={current_thread.native_id} t_name={current_thread.getName()} cp.pid={current_process.pid} c_p={current_process} c_t={current_thread}"
+        return (
+            f"PID={os.getpid()} TID={current_thread.native_id} "
+            f"t_name={current_thread.getName()} cp.pid={current_process.pid} "
+            f"c_p={current_process} c_t={current_thread}"
+        )
 
 
 class MultiprocessGlobalContext:
@@ -106,25 +116,25 @@ class MultiprocessGlobalContext:
         return logger
 
 
-global_context: MultiprocessGlobalContext = None
-parent_queue_listener: logging.handlers.QueueListener = None
-queue_handler: logging.handlers.QueueHandler = None
-created_logging_handlers: set = set()
-is_global_queue_handler_setup: bool = False
+_GLOBAL_CONTEXT: MultiprocessGlobalContext = None
+_PARENT_QUEUE_LISTENER: logging.handlers.QueueListener = None
+_QUEUE_HANDLER: logging.handlers.QueueHandler = None
+_CREATED_LOGGING_HANDLERS: set = set()
+_IS_GLOBAL_QUEUE_HANDLER_SETUP: bool = False
 
 
 def global_init_subprocess(global_context_from_parent):
-    global global_context
-    global_context = global_context_from_parent
+    global _GLOBAL_CONTEXT
+    _GLOBAL_CONTEXT = global_context_from_parent
     _connect_root_logger_to_global_logging_queue()
 
 
 def global_init(logging_level="INFO", verbosity_level=0):
-    global global_context
-    if global_context:
+    global _GLOBAL_CONTEXT
+    if _GLOBAL_CONTEXT:
         return
     # Create system global logging mp Queue.
-    global_context = MultiprocessGlobalContext(
+    _GLOBAL_CONTEXT = MultiprocessGlobalContext(
         logging_queue=multiprocessing.Queue(),
         logging_level=logging_level,
         verbosity_level=verbosity_level,
@@ -136,44 +146,44 @@ def get_process_pool_exec_init_func():
 
 
 def get_process_pool_exec_init_args():
-    return (global_context,)
+    return (_GLOBAL_CONTEXT,)
 
 
 def track_logging_handler(*handlers):
-    created_logging_handlers.update(handlers)
+    _CREATED_LOGGING_HANDLERS.update(handlers)
 
 
 def untrack_logging_handler(*handlers):
     untracked = []
     for h in handlers:
-        if h in created_logging_handlers:
+        if h in _CREATED_LOGGING_HANDLERS:
             untracked.append(h)
-            created_logging_handlers.remove(h)
+            _CREATED_LOGGING_HANDLERS.remove(h)
     return untracked
 
 
 def start_global_queue_listener(*logging_handlers):
-    global parent_queue_listener
-    if not global_context:
+    global _PARENT_QUEUE_LISTENER
+    if not _GLOBAL_CONTEXT:
         raise GlobalContextNotSet(f"global_context not initialized.")
-    if parent_queue_listener:
+    if _PARENT_QUEUE_LISTENER:
         raise QueueListenerAlreadyStarted(f"parent_queue_listener already started.")
-    parent_queue_listener = logging.handlers.QueueListener(
-        global_context.global_logging_queue, *logging_handlers
+    _PARENT_QUEUE_LISTENER = logging.handlers.QueueListener(
+        _GLOBAL_CONTEXT.global_logging_queue, *logging_handlers
     )
     track_logging_handler(*logging_handlers)
-    parent_queue_listener.start()
+    _PARENT_QUEUE_LISTENER.start()
 
 
 def stop_global_queue_listener():
-    global parent_queue_listener
-    if not parent_queue_listener:
+    global _PARENT_QUEUE_LISTENER
+    if not _PARENT_QUEUE_LISTENER:
         raise QueueListenerNotStarted(f"parent_queue_listener not started.")
-    p = parent_queue_listener
+    p = _PARENT_QUEUE_LISTENER
 
     untracked_handlers = untrack_logging_handler(*p.handlers)
 
-    parent_queue_listener = None
+    _PARENT_QUEUE_LISTENER = None
     p.stop()
     p.handlers = ()
 
@@ -187,6 +197,7 @@ def switch_to_non_queued_logging():
     command-line, where logging latency can be problematic
     with interleaved with non-logging I/O.
     """
+    # pylint: disable=broad-except
     try:
         handlers = stop_global_queue_listener()
     except Exception:
@@ -197,19 +208,19 @@ def switch_to_non_queued_logging():
     for h in handlers:
         root_logger.addHandler(h)
     # Stop supplying queue_handler.
-    global_context.remove_queue_handler_logger(handler=queue_handler)
+    _GLOBAL_CONTEXT.remove_queue_handler_logger(handler=_QUEUE_HANDLER)
 
 
 def _connect_root_logger_to_global_logging_queue():
-    global is_global_queue_handler_setup
-    global queue_handler
-    if not global_context:
+    global _IS_GLOBAL_QUEUE_HANDLER_SETUP
+    global _QUEUE_HANDLER
+    if not _GLOBAL_CONTEXT:
         raise GlobalContextNotSet()
-    if is_global_queue_handler_setup:
+    if _IS_GLOBAL_QUEUE_HANDLER_SETUP:
         return
     # Root logger writes to queue handler going to global queue.
-    _, queue_handler = global_context.create_queue_handler_logger()
-    is_global_queue_handler_setup = True
+    _, _QUEUE_HANDLER = _GLOBAL_CONTEXT.create_queue_handler_logger()
+    _IS_GLOBAL_QUEUE_HANDLER_SETUP = True
 
 
 def remove_root_stream_handlers():
@@ -219,6 +230,7 @@ def remove_root_stream_handlers():
     When doing this, we do not want to touch handlers
     added by pytest etc.
     """
+    # pylint: disable=unidiomatic-typecheck
 
     # The following will not work...
     #     if isinstance(h, logging.StreamHandler):
@@ -246,27 +258,30 @@ def remove_created_logging_handlers():
     ]
     for l in all_loggers:
         for h in l.handlers:
-            if h in created_logging_handlers:
+            if h in _CREATED_LOGGING_HANDLERS:
                 l.handlers.remove(h)
                 untrack_logging_handler(h)
 
 
 def initialize_logging(logfile, loglevel, verbosity_level, log_console_detail):
-    if not global_context:
+    if not _GLOBAL_CONTEXT:
         raise GlobalContextNotSet()
     file_log_level = logging.DEBUG
     console_log_level = logging.INFO
-    global_context.global_logging_level = logging.INFO
-    global_context.global_verbosity_level = 0
+    _GLOBAL_CONTEXT.global_logging_level = logging.INFO
+    _GLOBAL_CONTEXT.global_verbosity_level = 0
     if loglevel is not None:
         file_log_level = loglevel
         console_log_level = loglevel
-        global_context.global_logging_level = loglevel
+        _GLOBAL_CONTEXT.global_logging_level = loglevel
     if verbosity_level is not None:
-        global_context.global_verbosity_level = verbosity_level
+        _GLOBAL_CONTEXT.global_verbosity_level = verbosity_level
 
     detailed_formatter = logging.Formatter(
-        fmt="%(asctime)s.%(msecs)03d PID=%(process)-05d TID=%(thread)-05d %(name)-12s %(levelname)-8s %(message)s",
+        fmt=(
+            "%(asctime)s.%(msecs)03d PID=%(process)-05d TID=%(thread)-05d "
+            "%(name)-12s %(levelname)-8s %(message)s"
+        ),
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
@@ -294,16 +309,16 @@ def initialize_logging(logfile, loglevel, verbosity_level, log_console_detail):
 
 def set_verbosity_level(level):
     global_init()
-    if not global_context:
+    if not _GLOBAL_CONTEXT:
         raise GlobalContextNotSet()
-    global_context.global_verbosity_level = int(level)
+    _GLOBAL_CONTEXT.global_verbosity_level = int(level)
 
 
 def get_verbosity_level() -> int:
     global_init()
-    if not global_context:
+    if not _GLOBAL_CONTEXT:
         raise GlobalContextNotSet()
-    return global_context.global_verbosity_level
+    return _GLOBAL_CONTEXT.global_verbosity_level
 
 
 def deinitialize_logging():

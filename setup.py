@@ -11,42 +11,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+r"""setup.py
+"""
 
+from pathlib import Path
 import setuptools
 
-# Redirect from long_description to github README.rst since
-# PyPi chokes on this particular README.rst.
-# with open("README.rst", "r", encoding="utf-8") as fh:
-#    long_description = fh.read()
+# read the contents of your README file
+this_directory = Path(__file__).parent
+long_description = (this_directory / "README.md").read_text()
 
 setuptools.setup(
-    name="atbu-pkg",
-    version="0.0.11",
+    name="atbu-mp-pipeline-pkg",
+    version="0.0.1",
     author="Ashley R. Thomas",
     author_email="ashley.r.thomas.701@gmail.com",
     description= (
-        "ATBU package supports local/cloud backup/restore "
-        "as well as local file integrity diff tool for helping in "
-        "efforts to manage file integrity, duplication, and bitrot detection."
+        "ATBU atbu.mp_pipeline package, a multiprocessing work item pipeline."
     ),
-    entry_points = {
-        'console_scripts': ['atbu=atbu.common.command_line:main']
-    },
-    long_description="""
-ATBU Backup & Persistent File Information is a local/cloud backup/restore
-command-line utility with optional deduplication and bitrot detection,
-plus a little utility with useful digest-based directory file diff'ing.
-
-Install: `pip install atbu-pkg`
-
-GitHub: https://github.com/AshleyT3/atbu
-
-Documentation: https://atbu.readthedocs.io/en/latest/
-""",
+    long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/AshleyT3/atbu",
+    url="https://github.com/AshleyT3/atbu-mp-pipeline",
     project_urls={
-        "Bug Tracker": "https://github.com/AshleyT3/atbu/issues",
+        "Bug Tracker": "https://github.com/AshleyT3/atbu-mp-pipeline/issues",
     },
     classifiers=[
         "Programming Language :: Python :: 3",
@@ -59,14 +46,6 @@ Documentation: https://atbu.readthedocs.io/en/latest/
     packages=setuptools.find_packages(where="src"),
     python_requires=">=3.9",
     install_requires=[
-        "cryptography >= 36.0.2",
-        "pwinput >= 1.0.2",
-        "keyring >= 23.5.0",
-        "apache-libcloud >= 3.5.1",
-        "google-auth >= 2.6.5",
-        "google-cloud-storage >= 2.3.0",
-        "google-resumable-media >= 2.3.2",
-        "tabulate >= 0.8.9",
-        "Send2Trash >= 1.8.0",
+        "atbu-common-pkg >= 0.0.1",
     ]
 )

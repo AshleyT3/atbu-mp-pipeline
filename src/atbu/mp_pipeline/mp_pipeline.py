@@ -14,10 +14,9 @@
 r"""MultiprocessingPipeline.
 """
 
-# pylint: disable=missing-class-docstring
-
 from abc import abstractmethod
 import copy
+from dataclasses import dataclass
 import io
 import logging
 import multiprocessing
@@ -30,8 +29,15 @@ from concurrent.futures import (
 )
 from multiprocessing.connection import Connection
 import queue
-import time
 from typing import Callable
+
+from atbu.common.exception import (
+    InvalidFunctionArgument,
+    InvalidStateError,
+    Anomaly,
+    ANOMALY_KIND_EXCEPTION,
+    exc_to_string,
+)
 
 from .exception import *
 from .mp_global import get_verbosity_level
@@ -75,7 +81,8 @@ class PipeConnectionIO(io.RawIOBase):
         self._eof = False
         if _is_very_verbose_logging():
             logging.debug(
-                f"ConnectionIO.__init__: fileno={self._cached_fileno} is_write={is_write} {'Sender' if is_write else 'Receiver'}."
+                f"ConnectionIO.__init__: fileno={self._cached_fileno} "
+                f"is_write={is_write} {'Sender' if is_write else 'Receiver'}."
             )
 
     @staticmethod
@@ -118,11 +125,13 @@ class PipeConnectionIO(io.RawIOBase):
                 size = len(msg.data)
             if msg.cmd == PIPE_CONN_MSG_CMD_DATA_FINAL and self.eof:
                 raise PipeConnectionAlreadyEof(
-                    f"PipeConnectionIO.send_message: cannot send PIPE_CONN_MSG_CMD_DATA_FINAL, already eof."
+                    f"PipeConnectionIO.send_message: "
+                    f"cannot send PIPE_CONN_MSG_CMD_DATA_FINAL, already eof."
                 )
             if _is_very_verbose_logging():
                 logging.debug(
-                    f"PipeConnectionIO.send_message: sending: fileno={self._cached_fileno} cmd={msg.cmd} size={size}..."
+                    f"PipeConnectionIO.send_message: sending: "
+                    f"fileno={self._cached_fileno} cmd={msg.cmd} size={size}..."
                 )
             self.c.send(msg)
             if msg.cmd == PIPE_CONN_MSG_CMD_DATA_FINAL:
@@ -131,12 +140,14 @@ class PipeConnectionIO(io.RawIOBase):
                 self._num_bytes += size
                 if _is_very_verbose_logging():
                     logging.debug(
-                        f"PipeConnectionIO.send_message: sent: fileno={self._cached_fileno} cmd={msg.cmd} size={size} conv_total={self._num_bytes}"
+                        f"PipeConnectionIO.send_message: sent: fileno={self._cached_fileno} "
+                        f"cmd={msg.cmd} size={size} conv_total={self._num_bytes}"
                     )
             else:
                 if _is_very_verbose_logging():
                     logging.debug(
-                        f"PipeConnectionIO.send_message: sent: fileno={self._cached_fileno} cmd={msg.cmd}: data as bytes not present."
+                        f"PipeConnectionIO.send_message: sent: fileno={self._cached_fileno} "
+                        f"cmd={msg.cmd}: data as bytes not present."
                     )
         except Exception as ex:
             logging.error(
@@ -174,12 +185,14 @@ class PipeConnectionIO(io.RawIOBase):
                 self._num_bytes += len(msg.data)
                 if _is_very_verbose_logging():
                     logging.debug(
-                        f"PipeConnectionIO.recv_message: received: fileno={self._cached_fileno} cmd={msg.cmd} size={len(msg.data)} conv_total={self._num_bytes}"
+                        f"PipeConnectionIO.recv_message: received: fileno={self._cached_fileno} "
+                        f"cmd={msg.cmd} size={len(msg.data)} conv_total={self._num_bytes}"
                     )
             else:
                 if _is_very_verbose_logging():
                     logging.debug(
-                        f"PipeConnectionIO.recv_message: received: fileno={self._cached_fileno} cmd={msg.cmd}: data as bytes not present."
+                        f"PipeConnectionIO.recv_message: received: fileno={self._cached_fileno} "
+                        f"cmd={msg.cmd}: data as bytes not present."
                     )
             return msg
         except EOFError:
@@ -236,7 +249,8 @@ class PipeConnectionIO(io.RawIOBase):
             # expect writing zero to be a NOP.
             if _is_very_verbose_logging():
                 logging.debug(
-                    f"PipeConnectionIO.write: fileno={self._cached_fileno} Skipping zero-byte write."
+                    f"PipeConnectionIO.write: fileno={self._cached_fileno} "
+                    f"Skipping zero-byte write."
                 )
             return 0
         return self._write(PIPE_CONN_MSG_CMD_DATA, buf)
@@ -348,7 +362,10 @@ class PipelineWorkItem:
     ]
 
     def __str__(self) -> str:
-        return f"{self.__class__.__name__}: next_stage={self._cur_stage} user_obj={self.user_obj} exceps={self.exceptions}"
+        return (
+            f"{self.__class__.__name__}: next_stage={self._cur_stage} "
+            f"user_obj={self.user_obj} exceps={self.exceptions}"
+        )
 
     @property
     def auto_copy_attr(self):
@@ -915,6 +932,7 @@ class MultiprocessingPipeline:
         stage_num: int = None,
     ) -> bool:
         """Returns True if next stage wants work item, else False."""
+        # pylint: disable=broad-except
         if stage_num is None:
             stage_num = wi.cur_stage
         next_stage = self._stages[stage_num]

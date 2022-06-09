@@ -14,8 +14,6 @@
 r"""Common test helpers.
 """
 
-# pylint: disable=unnecessary-pass
-
 from dataclasses import dataclass
 from io import SEEK_END, SEEK_SET
 import os
@@ -42,22 +40,23 @@ from libcloud.storage.drivers.azure_blobs import (
     AZURE_DOWNLOAD_CHUNK_SIZE,
     AZURE_UPLOAD_CHUNK_SIZE,
 )
-from atbu.common.constants import (
+
+from atbu.tools.backup.constants import (
     CRED_KEY_TYPE_ENCRYPTION,
     CRED_OPERATION_SET_PASSWORD_TO_PRIVATE_KEY,
 )
-from atbu.backup.credentials import Credential
+
+from atbu.tools.backup.credentials import Credential
 
 # Even for local-only tests, include chunk sizes for
 # max-related potential edge cases.
-from atbu.backup.storage_interface.base import (
+from atbu.tools.backup.storage_interface.base import (
     DEFAULT_CHUNK_DOWNLOAD_SIZE,
     DEFAULT_CHUNK_UPLOAD_SIZE,
 )
 
-from atbu.backup.config import AtbuConfig
-
-from atbu.backup.creds_cmdline import handle_credential_change
+from atbu.tools.backup.config import AtbuConfig
+from atbu.tools.backup.creds_cmdline import handle_credential_change
 from atbu.common.exception import InvalidStateError  # pylint: disable=unused-import
 
 
