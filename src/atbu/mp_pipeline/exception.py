@@ -16,6 +16,7 @@ r"""ATBU mp_pipeline exceptions.
 
 from atbu.common.exception import AtbuException
 
+
 class GlobalContextNotSet(AtbuException):
     def __init__(self, message: str = None, cause=None):
         self._cause = cause

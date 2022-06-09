@@ -1003,7 +1003,9 @@ class MultiprocessingPipeline:
         #
         wi.increment_stage()
         next_stage = self._stages[wi.cur_stage]
-        fut_r = self._submit_to_stage(stage=next_stage, wi=wi, pipe_conn=conn_r)
+        fut_r = self._submit_to_stage(
+            stage=next_stage, wi=wi, pipe_conn=conn_r, use_second_pool=True
+        )
         self._log_state(
             ctx_str="dual stage submission", futs_of_interest=set([fut_w, fut_r])
         )
