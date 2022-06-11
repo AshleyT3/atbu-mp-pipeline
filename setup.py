@@ -18,12 +18,13 @@ from pathlib import Path
 import setuptools
 
 # read the contents of your README file
-this_directory = Path(__file__).parent
-long_description = (this_directory / "README.md").read_text()
+this_dir = Path(__file__).parent
+docs_dir = this_dir / "docs"
+long_description = (docs_dir / "README.md").read_text()
 
 setuptools.setup(
     name="atbu-mp-pipeline-pkg",
-    version="0.0.3",
+    version="0.0.4",
     author="Ashley R. Thomas",
     author_email="ashley.r.thomas.701@gmail.com",
     description= (

@@ -14,15 +14,17 @@
 
 # pylint: disable=unused-argument
 
-from concurrent.futures import Future, ProcessPoolExecutor
 import os
-from pathlib import Path
-import logging
-from random import randint
 import time
+from pathlib import Path
+from random import randint
+import logging
+import concurrent.futures
+from concurrent.futures import ALL_COMPLETED, Future, ProcessPoolExecutor
+from turtle import st
 import pytest
-from atbu.mp_pipeline.exception import PipeConnectionAlreadyEof
 
+from atbu.mp_pipeline.exception import PipeConnectionAlreadyEof
 from atbu.mp_pipeline.mp_pipeline import (
     MultiprocessingPipeline,
     PipeConnectionIO,
@@ -74,9 +76,9 @@ def always_yes(wi: PipelineWorkItem):
     return True
 
 
-def test_subprocess_pipeline_basic(tmp_path: Path):
+def test_mp_pipeline_basic(tmp_path: Path):
     sp = MultiprocessingPipeline(
-        name="test_subprocess_pipeline_basic",
+        name="test_mp_pipeline_basic",
         stages=[
             SubprocessPipelineStage(
                 fn_determiner=always_yes,
@@ -133,11 +135,11 @@ class LargePipelineStage(SubprocessPipelineStage):
         return pwi
 
 
-def test_subprocess_pipeline_large(tmp_path: Path):
+def test_mp_pipeline_large(tmp_path: Path):
     stages = 100
     sp = MultiprocessingPipeline(
         max_simultaneous_work_items=min(os.cpu_count(), 15),
-        name="test_subprocess_pipeline_large",
+        name="test_mp_pipeline_large",
     )
     for i in range(stages):
         sp.add_stage(stage=LargePipelineStage())
@@ -186,9 +188,9 @@ def perform_thread_stage_work(
     return pwi
 
 
-def test_subprocess_pipeline_large_mixed(tmp_path: Path):
+def test_mp_pipeline_large_mixed(tmp_path: Path):
     sp = MultiprocessingPipeline(
-        name="test_subprocess_pipeline_large_mixed",
+        name="test_mp_pipeline_large_mixed",
         max_simultaneous_work_items=min(os.cpu_count(), 15),
     )
     for _ in range(10):
@@ -311,3 +313,116 @@ def test_pipe_io_connection_many(tmp_path: Path):
         assert len(r) == 3
         assert r == expected
         del rw_fut_conn[idx]
+
+
+class ProducerConsumerWorkItem(PipelineWorkItem):
+    def __init__(self, demo_pipe_io_wrapper) -> None:
+        super().__init__(auto_copy_attr=False)
+        self.demo_pipe_io_wrapper = demo_pipe_io_wrapper
+        self.producer_data = None # What producer sent.
+        self.producer_bytes_written = None
+        self.consumer_data = None # What consumer received
+
+    def stage_complete(
+        self,
+        stage_num: int,  # pylint: disable=unused-argument
+        wi: "PipelineWorkItem",  # pylint: disable=unused-argument
+        ex: Exception,
+    ):
+        super().stage_complete(
+            stage_num=stage_num,
+            wi=wi,
+            ex=ex,
+        )
+        if not wi.is_failed:
+            if stage_num == 0:
+                self.producer_data = wi.producer_data
+                self.producer_bytes_written = wi.producer_bytes_written
+            elif stage_num == 1:
+                self.consumer_data = wi.consumer_data
+
+
+class ProducerPipelineSubprocessStage(SubprocessPipelineStage):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def is_for_stage(self, pwi: ProducerConsumerWorkItem) -> bool:
+        return True # Yes, we want to see all work items in this stage.
+
+    @property
+    def is_pipe_with_next_stage(self):
+        """Return True to indicate we want this stage and the next one
+        to run in parallel, where this stage is the producer feeding a
+        pipeline-supplied pipe, and the next stage is consuming from that
+        same pipe (on the reader side).
+        """
+        return True
+
+    def perform_stage_work(
+        self,
+        pwi: ProducerConsumerWorkItem,
+        **kwargs,
+    ):
+        if not isinstance(pwi, ProducerConsumerWorkItem):
+            raise ValueError(
+                f"Pipeline gave us unexpected work item."
+            )
+        pwi.producer_data = os.urandom(10)
+        if pwi.demo_pipe_io_wrapper:
+            # PipeConnectionIO wraps the multiprocessing Pipe, providing
+            # an io.RawIOBase interface (with limitations... i.e., seek is
+            # not supported).
+            with PipeConnectionIO(pwi.pipe_conn, is_write=True) as pipe_io:
+                pwi.producer_bytes_written = pipe_io.write(pwi.producer_data)
+        else:
+            # Just use the pipe connection directly.
+            pwi.pipe_conn.send_bytes(pwi.producer_data)
+            pwi.producer_bytes_written = len(pwi.producer_data)
+        return pwi
+
+
+class ConsumerPipelineSubprocessStage(SubprocessPipelineStage):
+    def __init__(self) -> None:
+        super().__init__()
+
+    def is_for_stage(self, pwi: ProducerConsumerWorkItem) -> bool:
+        return True # Yes, we want to see all work items in this stage.
+
+    def perform_stage_work(
+        self,
+        pwi: ProducerConsumerWorkItem,
+        **kwargs,
+    ):
+        if pwi.demo_pipe_io_wrapper:
+            # PipeConnectionIO wraps the multiprocessing Pipe, providing
+            # an io.RawIOBase interface (with limitations... i.e., seek is
+            # not supported).
+            with PipeConnectionIO(pwi.pipe_conn, is_write=False) as pipe_io:
+                pwi.consumer_data = pipe_io.read()
+        else:
+            # Just use the pipe connection directly.
+            pwi.consumer_data = pwi.pipe_conn.recv_bytes()
+        return pwi
+
+def test_mp_pipeline_producer_consumer(tmp_path: Path):
+    mpp = MultiprocessingPipeline(
+        name="test_mp_producer_oncsoler",
+        stages=[
+            ProducerPipelineSubprocessStage(),
+            ConsumerPipelineSubprocessStage()
+        ]
+    )
+    wil = [
+        ProducerConsumerWorkItem(demo_pipe_io_wrapper=True),
+        ProducerConsumerWorkItem(demo_pipe_io_wrapper=False)
+    ]
+    fut = [mpp.submit(wi) for wi in wil]
+    done, not_done = concurrent.futures.wait(fs=fut, return_when=ALL_COMPLETED)
+    assert len(done) == 2
+    for f in done:
+        r_wi: ProducerConsumerWorkItem = f.result()
+        assert not r_wi.is_failed
+        assert r_wi.producer_bytes_written == 10
+        assert r_wi.producer_data == r_wi.consumer_data
+    mpp.shutdown()
+    assert mpp.was_graceful_shutdown

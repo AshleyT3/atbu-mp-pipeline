@@ -9,3 +9,6 @@ dist/
 _build/
 secrets.py
 *.code-workspace
+.idea/
+dist/
+docs/apidocs/*

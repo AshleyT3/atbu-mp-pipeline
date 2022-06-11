@@ -29,7 +29,7 @@ from concurrent.futures import (
 )
 from multiprocessing.connection import Connection
 import queue
-from typing import Callable
+from typing import Callable, Union
 
 from atbu.common.exception import (
     InvalidFunctionArgument,
@@ -51,26 +51,79 @@ def _is_very_verbose_logging():
 
 
 PIPE_CONN_MSG_CMD_DATA = "data"
+"""A :class:`PipeConnectionMessage` command where `data` is valid non-None data
+and is not the last data message of the pipe conversation.
+
+The data bytes can be empty zero-length though generally that would be saved
+for the last message (see :data:`PIPE_CONN_MSG_CMD_DATA_FINAL`).
+
+Generally, a pipe connection will consistent of zero or more
+:data:`PIPE_CONN_MSG_CMD_DATA` commands and a final
+:data:`PIPE_CONN_MSG_CMD_DATA_FINAL` command.
+"""
+
 PIPE_CONN_MSG_CMD_DATA_FINAL = "data-final"
-PIPE_CONN_MSG_DATA_CMDS = [PIPE_CONN_MSG_CMD_DATA, PIPE_CONN_MSG_CMD_DATA_FINAL]
+"""A :class:`PipeConnectionMessage` command where `data` is valid non-None data
+and is the last data message of the pipe conversation.
+
+The data bytes can be empty zero-length though generally that would be saved
+for the last message (see :data:`PIPE_CONN_MSG_CMD_DATA`).
+
+Generally, a pipe connection will consistent of zero or more
+:data:`PIPE_CONN_MSG_CMD_DATA` commands and a final
+:data:`PIPE_CONN_MSG_CMD_DATA_FINAL` command.
+"""
+
+_PIPE_CONN_MSG_DATA_CMDS = [PIPE_CONN_MSG_CMD_DATA, PIPE_CONN_MSG_CMD_DATA_FINAL]
+"""A list of all pipe commands which can be used for validation.
+"""
 
 
 class PipeConnectionMessage:
+    """Construct a pipe connection message.
+    
+    A pipe connection message. Each instance is used to send a message from
+    message producer to consumer.
+
+    Args:
+        cmd (str): The pipe command which can be one of
+            :data:`PIPE_CONN_MSG_CMD_DATA` or
+            :data:`PIPE_CONN_MSG_CMD_DATA`, or some other custom string for
+            a custom message.
+        data (bytes, optional): The data bytes for the message. Defaults to
+            None.
+
+    Raises:
+        InvalidFunctionArgument: If `data` is neither a bytes nor bytearray.
+    """
     def __init__(self, cmd: str, data: bytes = None) -> None:
         if data is None:
             data = bytes()
         if not isinstance(data, (bytes, bytearray)):
-            raise InvalidFunctionArgument(f"Expecting data to be bytes or bytearray.")
+            raise InvalidFunctionArgument(
+                f"Expecting data to be bytes or bytearray."
+            )
         self.cmd = cmd
         self.data = data
 
 
 class PipeConnectionIO(io.RawIOBase):
-    """Allow FileIO-like interface with a Pipe Connection object. Not a
+    """Create a `PipeConnectionIO`.
+
+    Allow FileIO-like interface with a Pipe Connection object. Not a
     fully functional RawIOBase but close enough to meet certain the needs
     of certain classes which can accept/use such.
-    """
 
+    Generally, it supports read/write of bytes and `PipeConnectionMessage`
+    instances. In fact, reading and writing of bytes (or bytesarray) is
+    encapsulated first within `PipeConnectionMessage` which is then sent.
+
+    Args:
+        c (Connection): The writer (producer) or reader (consumer) side of
+            the pipe connection.
+        is_write (bool): If true, then `c` is the writer, else `c` is the
+            reader.
+    """
     # pylint: disable=no-self-use
     def __init__(self, c: Connection, is_write: bool) -> None:
         super().__init__()
@@ -86,7 +139,16 @@ class PipeConnectionIO(io.RawIOBase):
             )
 
     @staticmethod
-    def create_reader_writer_pair():
+    def create_reader_writer_pair(
+    ) -> tuple['PipeConnectionIO', 'PipeConnectionIO']:
+        """Create a `PipeConnectionIO` using a pipe connection created using
+            `multiprocessing.connection.Pipe`.
+
+        Returns:
+            A tuple of two :class:`PipeConnectionIO` instances, the first being
+                the consumer or "reader" end, the second being the producer or
+                "writer" end.
+        """
         r, w = multiprocessing.connection.Pipe(duplex=False)
         return (
             PipeConnectionIO(c=r, is_write=False),
@@ -94,6 +156,18 @@ class PipeConnectionIO(io.RawIOBase):
         )
 
     def reset_num_bytes(self):
+        """Reset the byte count as returned by both :meth:`num_bytes` and
+        :meth:`tell()`.
+
+        Resetting the count is useful if there is a need to perform an initial
+        message exchange before handing a stream off to another class that will
+        use it for the primary data transfer. In such cases, that other class
+        may use tell() to determine the current position, sometimes for the
+        purpose of mere sanity checking as part of validating state. In such
+        cases, where there is no seeking going on, but tell is still used,
+        having tell return a value of the actual core data byte count can be
+        useful.
+        """
         self._num_bytes = 0
 
     @property
@@ -102,6 +176,13 @@ class PipeConnectionIO(io.RawIOBase):
 
     @property
     def num_bytes(self):
+        """The number of data bytes sent or received since the class was
+        instantiated or :meth:`reset_num_bytes()` was called, which happened
+        most recently.
+
+        Returns:
+            _type_: _description_
+        """
         return self._num_bytes
 
     def tell(self) -> int:
@@ -111,23 +192,40 @@ class PipeConnectionIO(io.RawIOBase):
         return self.c.fileno()
 
     def send_message(self, msg: PipeConnectionMessage):
+        """Send a message to the consumer.
+
+        The producer sends a message to the consumer of the pipe using this
+        method.
+
+        Args:
+            msg (PipeConnectionMessage): The message to send to the consumer.
+
+        Raises:
+            InvalidFunctionArgument: If the supplied arguments are invalid.
+            PipeConnectionAlreadyEof: If the pipe connection is already in the
+                EOF state.
+        """
         size = -1
         try:
+            if self.eof:
+                raise PipeConnectionAlreadyEof(
+                    f"PipeConnectionIO.send_message: cannot send a message "
+                    f"given eof has already been sent/established."
+                )
             if not isinstance(msg, PipeConnectionMessage):
                 raise InvalidFunctionArgument(
-                    f"PipeConnectionIO.send_message: msg must be PipeConnectionMessage"
+                    f"PipeConnectionIO.send_message: msg must be "
+                    f"PipeConnectionMessage"
                 )
             if msg.cmd is None or not isinstance(msg.cmd, str):
                 raise InvalidFunctionArgument(
                     f"PipeConnectionIO.send_message: msg.cmd must be str"
                 )
-            if msg.data is not None and isinstance(msg.data, (bytes, bytearray)):
+            if msg.data is not None and isinstance(
+                msg.data,
+                (bytes, bytearray)
+            ):
                 size = len(msg.data)
-            if msg.cmd == PIPE_CONN_MSG_CMD_DATA_FINAL and self.eof:
-                raise PipeConnectionAlreadyEof(
-                    f"PipeConnectionIO.send_message: "
-                    f"cannot send PIPE_CONN_MSG_CMD_DATA_FINAL, already eof."
-                )
             if _is_very_verbose_logging():
                 logging.debug(
                     f"PipeConnectionIO.send_message: sending: "
@@ -140,13 +238,19 @@ class PipeConnectionIO(io.RawIOBase):
                 self._num_bytes += size
                 if _is_very_verbose_logging():
                     logging.debug(
-                        f"PipeConnectionIO.send_message: sent: fileno={self._cached_fileno} "
-                        f"cmd={msg.cmd} size={size} conv_total={self._num_bytes}"
+                        f"PipeConnectionIO.send_message: "
+                        f"sent: "
+                        f"fileno={self._cached_fileno} "
+                        f"cmd={msg.cmd} "
+                        f"size={size} "
+                        f"conv_total={self._num_bytes}"
                     )
             else:
                 if _is_very_verbose_logging():
                     logging.debug(
-                        f"PipeConnectionIO.send_message: sent: fileno={self._cached_fileno} "
+                        f"PipeConnectionIO.send_message: "
+                        f"sent: "
+                        f"fileno={self._cached_fileno} "
                         f"cmd={msg.cmd}: data as bytes not present."
                     )
         except Exception as ex:
@@ -158,10 +262,20 @@ class PipeConnectionIO(io.RawIOBase):
             raise
 
     def recv_message(self) -> PipeConnectionMessage:
+        """_summary_
+
+        Raises:
+            InvalidPipeConnectionMessage: If the received message is in bad
+                form.
+
+        Returns:
+            PipeConnectionMessage: The received message.
+        """
         try:
             if _is_very_verbose_logging():
                 logging.debug(
-                    f"PipeConnectionIO.recv_message: receiving: fileno={self._cached_fileno}..."
+                    f"PipeConnectionIO.recv_message: receiving: "
+                    f"fileno={self._cached_fileno}..."
                 )
             msg = self.c.recv()
             if not isinstance(msg, PipeConnectionMessage):
@@ -181,7 +295,10 @@ class PipeConnectionIO(io.RawIOBase):
                 )
             if msg.cmd == PIPE_CONN_MSG_CMD_DATA_FINAL:
                 self._eof = True
-            if msg.data is not None and isinstance(msg.data, (bytes, bytearray)):
+            if msg.data is not None and isinstance(
+                msg.data, 
+                (bytes, bytearray)
+            ):
                 self._num_bytes += len(msg.data)
                 if _is_very_verbose_logging():
                     logging.debug(
@@ -230,9 +347,26 @@ class PipeConnectionIO(io.RawIOBase):
                 f"PipeConnectionIO.write: buf must be bytes or bytearray."
             )
 
-    def write_eof(self, buf) -> int:
+    def write_eof(self, buf: Union[bytes,bytearray]) -> int:
+        """Write the last data buffer to the consumer/reader side of the pipe,
+        and mark both sides of the pipe connection as being in the EOF state.
+
+        Args:
+            buf (Union[bytes,bytearray]): The buffer to send to the
+                consumer/reader.
+
+        Raises:
+            PipeConnectionAlreadyEof: If the pipe is already in the EOF state.
+
+        Returns:
+            int: The number of data bytes sent which will always be the the
+                length of `buf`.
+        """
         if self.eof:
-            raise PipeConnectionAlreadyEof(f"PipeConnectionIO.write_eof: already eof.")
+            raise PipeConnectionAlreadyEof(
+                f"PipeConnectionIO.write_eof: cannot send a message "
+                f"given eof has already been sent/established."
+            )
         if _is_very_verbose_logging():
             logging.debug(
                 f"PipeConnectionIO.write_eof: fileno={self._cached_fileno} writing EOF."
@@ -240,7 +374,17 @@ class PipeConnectionIO(io.RawIOBase):
         self._validate_write_buf(buf=buf)
         return self._write(PIPE_CONN_MSG_CMD_DATA_FINAL, buf)
 
-    def write(self, buf) -> int:
+    def write(self, buf: Union[bytes,bytearray]) -> int:
+        """Write the last data buffer to the consumer/reader side of the pipe.
+
+        Args:
+            buf (Union[bytes,bytearray]): The buffer to send to the
+                consumer/reader.
+
+        Returns:
+            int: The number of data bytes sent which will always be the the
+                length of `buf`.
+        """
         self._validate_write_buf(buf=buf)
         if len(buf) == 0:
             # Disallow writing of zero bytes until,
@@ -256,6 +400,19 @@ class PipeConnectionIO(io.RawIOBase):
         return self._write(PIPE_CONN_MSG_CMD_DATA, buf)
 
     def read(self, size: int = None) -> bytes:
+        """Read data sent by the producer/writer end of the pipe.
+
+        Args:
+            size (int, optional): Retained to comply with the base class
+                interface. This must always be None.
+
+        Raises:
+            NotImplementedError: The writer is trying to read.
+            InvalidPipeConnectionMessage: The received message is in bad form.
+
+        Returns:
+            bytes: The received data.
+        """
         if self.is_write:
             raise NotImplementedError()
         if size is not None:
@@ -276,10 +433,10 @@ class PipeConnectionIO(io.RawIOBase):
                 raise InvalidPipeConnectionMessage(
                     f"PipeConnectionIO.read: msg.cmd must be str."
                 )
-            if msg.cmd not in PIPE_CONN_MSG_DATA_CMDS:
+            if msg.cmd not in _PIPE_CONN_MSG_DATA_CMDS:
                 raise InvalidPipeConnectionMessage(
                     f"PipeConnectionIO.read: "
-                    f"Expecting one of '{PIPE_CONN_MSG_DATA_CMDS}' but got '{msg.cmd}'"
+                    f"Expecting one of '{_PIPE_CONN_MSG_DATA_CMDS}' but got '{msg.cmd}'"
                 )
             if not isinstance(msg.data, (bytes, bytearray)):
                 raise InvalidPipeConnectionMessage(
@@ -318,26 +475,32 @@ class PipeConnectionIO(io.RawIOBase):
 
 
 class PipelineWorkItem:
+    """Create a pipeline work item.
+
+    An instance of PipelineWorkItem is an item of work that travels through
+    each stage of the pipeline. Some stages may reject the work item given some
+    state which indicates the stage is not required. When processing the work
+    item fails in any given stage, the work item is usually set to a failed
+    state and its current stage is set past the last stage, causing it to be
+    ended, usually signaling the submitting user  waiting on the Future.
+
+    Args:
+        user_obj (object, optional): is a caller object that must be
+            pickle'able and is always picked to/from subprocesses back to
+            this instance. Defaults to None. 
+        auto_copy_attr (bool, optional): If auto_copy_attr is True
+            (default), copy all attributes not specified OUR_ATTRIBUTES to
+            this instance after they are pickle'ed back from subprocesses.
+            Again, these must be pickle'able. Defaults to True.
+        kwargs: Anything else you want passed to all stages. It is
+        recommended you avoid kwargs and use members of this instance.
+    """
     def __init__(
         self,
         user_obj: object = None,
         auto_copy_attr: bool = True,
         **kwargs,
     ) -> None:
-        """Create a pipeline work item.
-
-        user_obj is a caller object that must be pickle'able and
-        is always picked to/from subprocesses back to this instance.
-
-        If auto_copy_attr is True (default), copy all attributes
-        not specified OUR_ATTRIBUTES to this instance after they
-        are pickle'ed back from subprocesses. Again, these must
-        be pickle'able.
-
-        kwargs is anything else you want passed to all stages. It
-        is recommended you avoid kwargs and use members of this
-        instance.
-        """
         #
         # IMPORTANT: Update OUR_ATTRIBUTES (above) if needed.
         #
@@ -352,7 +515,7 @@ class PipelineWorkItem:
     # Update this if you add/remove or change names of
     # attributes that should not be auto-copy'ed.
     #
-    OUR_ATTRIBUTES = [
+    _OUR_ATTRIBUTES = [
         "_cur_stage",
         "user_obj",
         "user_kwargs",
@@ -368,26 +531,46 @@ class PipelineWorkItem:
         )
 
     @property
-    def auto_copy_attr(self):
+    def auto_copy_attr(self) -> bool:
+        """If auto_copy_attr is True, user attributes added to this instance
+        are auto-copied during :meth:`stage_complete`. If False, no auto-copying
+        is performed. You can opt to disable auto-copying and perform manual
+        copying during :meth:`stage_complete`, perhaps based on state as
+        affected by previously run stages.
+
+        Returns:
+            bool: The current value.
+        """
         return self._auto_copy_attr
 
     @auto_copy_attr.setter
-    def auto_copy_attr(self, value):
+    def auto_copy_attr(self, value: bool):
         self._auto_copy_attr = value
 
     @property
     def is_failed(self):
+        """True if this work item has failed in one of the stages or during
+        pipeline processing. A failure occurs when one or more exceptions are
+        added to this instance via :meth:`append_exception`.
+
+        Returns:
+            _type_: _description_
+        """
         has_exceptions = self.exceptions is not None and len(self.exceptions) > 0
         return has_exceptions
 
     def increment_stage(self):
+        """Advance the current stage counter for this work item by one (i.e.,
+        advance to the next stage). Some internal processing may advance the
+        stage by more than one stage, such as advancing past the last stage
+        when completing a work item in error.
+        """
         self._cur_stage += 1
 
     @property
     def cur_stage(self):
-        """Current stage which is usually the next stage to
-        actually run, where the number increments after
-        submitting the work.
+        """Current stage which is usually the next stage to actually run, where
+        the number increments after submitting the work to that next stage.
         """
         return self._cur_stage
 
@@ -396,6 +579,18 @@ class PipelineWorkItem:
         self._cur_stage = value
 
     def append_exception(self, ex: Exception):
+        """Inform this work item instance that an error has occurred by giving
+        it the Exception-derived instance indicating the nature of the error.
+        This work item enters a failed state, where :attr:`is_failed` returns
+        True, after the first call to this
+        method.
+
+        Args:
+            ex (Exception): The exception instance indicating the nature of the
+                error. This does not have to be a raised exception. It can
+                equally be an Exception instance created for passing to this
+                method.
+        """
         if self.exceptions is None:
             self.exceptions = list[Exception]()
         self.exceptions.append(ex)
@@ -406,13 +601,29 @@ class PipelineWorkItem:
         wi: "PipelineWorkItem",  # pylint: disable=unused-argument
         ex: Exception,
     ):
-        """If ex is None, wi is the PipelineWorkItem from the stage's
-        Future result. If ex is not None, wi is this instance for use
-        as needed. The stage_num is the stage number that completed.
-        Overrides should either call this method via super() or provide
-        equal functionality to capture any error information. Beyond
-        that, use wi to capture any info from a successful result as
-        desired.
+        """Handle post-stage completion processing.
+
+        Post-stage completion processing can examine state and copy attributes
+        from the completing stage's :class:`PipelineWorkItem`.
+
+        Descendent classes should either call this method via super() or provide
+        equal functionality to capture any error information. Beyond that, use
+        wi to capture any info from a successful result as desired. The `wi`
+        instance is equal to `self` if `ex` is not None, which is the
+        case of the `Future` failing, where there there was no result from
+        `Future.result()`.
+
+        Args:
+            stage_num (int): The stage number completing.
+            wi (PipelineWorkItem): The work item relating to the stage that
+                just completed. If `ex` is None, `wi` is the PipelineWorkItem
+                from the stage's `Future` result. If `ex` is not `None`, `wi`
+                is this instance for use as needed.
+            ex (Exception): If the stage failed due to an unhandled exception,
+                this is the exception, otherwise it is None. If this is a
+                valid Exception instance, it means no results were returned
+                beyond the exception, where the pipeline processing code then
+                passes `self` as the `wi` argument for use as needed.
         """
         if ex is not None:
             self.append_exception(ex)
@@ -425,12 +636,17 @@ class PipelineWorkItem:
             # By default, copy all of user's additions.
             # User can disable as desired.
             for k, v in wi.__dict__.items():
-                if k not in PipelineWorkItem.OUR_ATTRIBUTES:
+                if k not in PipelineWorkItem._OUR_ATTRIBUTES:
                     self.__dict__[k] = v
 
 
 @dataclass(eq=True, frozen=True)
 class _WorkItemStageRunCtx:
+    """A PipelineWorkItem-to-Future relationship context.
+
+    A stage may execute one or two `Future` instances. Instances of this
+    class represent a relationship of work item to `Future`.
+    """
     cur_stage: int
     fut: Future
     wi: PipelineWorkItem
@@ -440,6 +656,13 @@ class _WorkItemStageRunCtx:
 
 
 class PipelineStage:
+    """Instances of this class represent a pipeline stage which can handle
+    executing work defined by a :class:`PipelineWorkItem`.
+
+    You will generally use either :class:`SubprocessPipelineStage` or
+    :class:`ThreadPipelineStage`, or some derived class thereto, instead of
+    this class directly
+    """
     def __init__(
         self,
         fn_determiner: Callable[[PipelineWorkItem], bool] = None,
@@ -453,6 +676,13 @@ class PipelineStage:
     @property
     @abstractmethod
     def is_subprocess(self):
+        """If true, this stage should be performed in a subprocess, else a
+        thread in the current process. This property must be overridden.
+
+        Raises:
+            NotImplementedError: If this class is used directly without an
+                override.
+        """
         raise NotImplementedError(
             f"is_subprocess is not implemented. "
             f"You probably want to use either "
@@ -461,9 +691,34 @@ class PipelineStage:
 
     @property
     def is_pipe_with_next_stage(self):
+        """True if this stage would like the pipeline manager to create a
+        pipe to be shared by this stage and the immediate following stage,
+        where the following stage should be immediate started in parallel
+        with this stage (aka dual-stage run).
+
+        Returns:
+            bool: True if this stage wants dual-stage with pipe, False if this
+                stage will run standalone (normal operation) without any need
+                for a pipe.
+        """
         return False
 
     def is_for_stage(self, pwi: PipelineWorkItem) -> bool:
+        """Called by the :class:`MultiprocessingPipeline` to find out if the
+        stage wants to process `pwi`. 
+
+        Args:
+            pwi (PipelineWorkItem): The work item for the stage to evaluate.
+
+        Raises:
+            InvalidStateError: This method is not overidden and its
+                :attr:`fn_determiner` attribute has not been set.
+
+        Returns:
+            bool: Returns True if this stage want to run the specified work
+                item, False if this stage does not want to execute the work
+                item.
+        """
         if self.fn_determiner is None:
             raise InvalidStateError(
                 f"PipelineStage fn_determiner is None, cannot determine anything."
@@ -480,23 +735,74 @@ class PipelineStage:
 
 
 class SubprocessPipelineStage(PipelineStage):
+    """A pipeline stage that is run in a subprocess.
+
+    Use this class directly or derive from it, override as desired. See
+    :class:`PipelineStage` for details.
+    """
+
     @property
     def is_subprocess(self):
         return True
 
 
 class ThreadPipelineStage(PipelineStage):
+    """A pipeline stage that is run in a thread within the same process that
+    hosts the :class:`MultiprocessingPipeline`.
+
+    Use this class directly or derive from it, override as desired. See
+    :class:`PipelineStage` for details.
+    """
+
     @property
     def is_subprocess(self):
         return False
 
 
 class MultiprocessingPipeline:
+    """Initialize a :class:`MultiprocessingPipeline` instance.
+
+    An instance of :class:`MultiprocessingPipeline` represents a
+    multiprocessing pipeline of one or more stages. Stages can be supplied
+    at construction, or added one by one using
+    :meth:`MultiprocessingPipeline.add_stage`. See methods for additional
+    information.
+
+    Args:
+        stages (list[PipelineStage], optional): The stages to include
+            in the pipeline. After a work item is submitted to this
+            pipeline, each stage gets a chance to "run" the work item
+            until the work item reaches the point past the last stage
+            at which time the submitting user is notified of work item
+            completion via its `Future` completion. Defaults to None.
+        max_simultaneous_work_items (int, optional): The maximum number of
+            simultaneously running work items desired. If None, no
+            simultaneous execution is required, otherwise the value is
+            used to calculate max_workers for the ProcessPoolExecutor
+            instances. Generally, a value should be specified for this
+            if any work items will require dual-stage with pipe execution.
+            Defaults to None.
+        name (str, optional): A name you would like this pipeline to have.
+            Used for naming threads and for logging. Defaults to "unnamed".
+        process_initfunc (_type_, optional): The process initialization
+            function you would like subprocesses to call. For example,
+            to use :mod:`mp_global`'s global logging, you would specify
+            the return value of :func:`mp_global.get_process_pool_exec_init_func()`.
+            Defaults to None.
+        process_initargs (tuple, optional): The arguments to pass to the
+            `process_initfunc` function. For example, to use
+            :mod:`mp_global`'s global logging, you would specify the return
+            value of :func:`mp_global.get_process_pool_exec_init_args()`.
+            Defaults to ().
+
+    Raises:
+        InvalidFunctionArgument: Raised if you specify an invalid argument.
+    """
     def __init__(
         self,
         stages: list[PipelineStage] = None,
-        max_simultaneous_work_items=None,
-        name="unnamed",
+        max_simultaneous_work_items: int=None,
+        name: str="unnamed",
         process_initfunc=None,
         process_initargs=(),
     ) -> None:
@@ -538,10 +844,22 @@ class MultiprocessingPipeline:
         self.anomalies = list[Anomaly]()
 
     def add_stage(self, stage: PipelineStage):
+        """Add a stage to the pipeline. Stages are numbered in the order added,
+        starting with stage number 0 when the first stage is added. Stages
+        can also be added at instance initialization time.
+
+        Args:
+            stage (PipelineStage): The stage to add.
+        """
         self._stages.append(stage)
 
     @property
     def num_stages(self) -> int:
+        """The number of stages added to this instance.
+
+        Returns:
+            int: The number of stages.
+        """
         return len(self._stages)
 
     def _start(self):
@@ -556,6 +874,11 @@ class MultiprocessingPipeline:
         )
 
     def shutdown(self):
+        """Shutdown this pipeline. This should be called before the process
+        exits. It waits to ensure all pending work items (their `Future`)
+        instances have completed and then shuts down any ProcessPoolExecutor
+        and ThreadPoolExecutor instances.
+        """
         if self._pl_worker_future is None:
             return
         while len(self._wi_to_wifut) > 0:
@@ -1109,6 +1432,21 @@ class MultiprocessingPipeline:
         self,
         work_item: PipelineWorkItem,
     ) -> Future:
+        """Submit a work item to this pipeline instance.
+
+        Args:
+            work_item (PipelineWorkItem): The work item to submit.
+
+        Raises:
+            InvalidFunctionArgument: If the work item has already been submitted
+                or if it is invalid for some reason as specified by the
+                exception message.
+
+        Returns:
+            Future: The caller can save/monitor this `Future` instance. For
+                example, the caller may choose to wait on this Future, perhaps
+                along with others.
+        """
         if work_item is None:
             raise InvalidFunctionArgument(f"work_item must be a PipelineWorkItem.")
         if self._wi_to_wifut.get(work_item) is not None:

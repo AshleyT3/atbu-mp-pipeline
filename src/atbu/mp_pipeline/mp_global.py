@@ -20,6 +20,7 @@ import logging
 import logging.handlers
 import multiprocessing
 import threading
+from typing import Callable
 
 
 from atbu.common.exception import (
@@ -33,40 +34,63 @@ from .exception import (
 
 
 class ProcessThreadContextMixin:
-    """A mixin to add useful functions for logging performed
-    by multiprocessing classes.
+    """A mixin to add useful functions for logging performed by
+    multiprocessing classes.
     """
 
     @property
     def our_process(self):
+        """Return the current process returned by
+        :meth:`multiprocessing.current_process()`.
+        """
         return multiprocessing.current_process()
 
     @property
     def our_thread(self):
+        """Return the current thread returned by
+        :meth:`threading.current_thread()`.
+        """
         return threading.current_thread()
 
     @property
     def our_thread_name(self):
+        """Returns the current thread's name.
+        """
         return self.our_thread.name
 
     def get_exec_context_log_stamp_str(self):
+        """Return a string useful for logging which contains the current
+        PID, TID, and thread name.
+        """
         current_process = self.our_process
         current_thread = self.our_thread
         return (
             f"PID={os.getpid()} TID={current_thread.native_id} "
             f"t_name={current_thread.getName()} cp.pid={current_process.pid} "
-            f"c_p={current_process} c_t={current_thread}"
+            f"c_p={str(current_process)} c_t={str(current_thread)}"
         )
 
 
-class MultiprocessGlobalContext:
-    """MP global context. WARNING: Do not add any member variables that cannot be pickled, or
-    generally avoid doing so if sharing is not needed.
-    """
+class _MultiprocessGlobalContext:
+    """Initialize a global context instance.
+    
+    MP global context. WARNING: Do not add any member
+    variables that cannot be pickled, or generally avoid
+    doing so if sharing is not needed.
 
+    Args:
+        logging_queue (:obj:`multiprocessing.Queue`): A multiprocessing
+            shared process queue.
+        logging_level (:obj:`str`): The Python logging level (i.e., "INFO",
+            "DEBUG").
+        verbosity_level (:obj:`int`): The verbosity level.
+    """
     def __init__(self, logging_queue, logging_level, verbosity_level):
+
         self._global_logging_queue = logging_queue
+        # The global logging level.
         self.global_logging_level = logging_level
+        # THe global verbosity level.
         self.global_verbosity_level = verbosity_level
 
     @property
@@ -77,7 +101,7 @@ class MultiprocessGlobalContext:
         logger = logging.getLogger()
         handler = logging.handlers.QueueHandler(self._global_logging_queue)
         logger.addHandler(handler)
-        track_logging_handler(handler)
+        _track_logging_handler(handler)
         if log_level:
             logger.setLevel(log_level)
         else:
@@ -99,12 +123,16 @@ class MultiprocessGlobalContext:
             if handler == h:
                 logger.handlers.remove(h)
                 break
-        untrack_logging_handler(handler)
+        _untrack_logging_handler(handler)
 
     def _perform_queue_logger_deadlock_workaround(self, logger, init_msg=None):
+        """Perform a workaround for
+        `https://github.com/python/cpython/issues/91555`.
+        """
         if not init_msg:
             init_msg = (
-                f"Initializing queue logger: PID={os.getpid()} level={logger.level}"
+                f"Initializing queue logger: "
+                f"PID={os.getpid()} level={logger.level}"
             )
         orig_level = logger.level
         logger.setLevel("INFO")
@@ -116,44 +144,136 @@ class MultiprocessGlobalContext:
         return logger
 
 
-_GLOBAL_CONTEXT: MultiprocessGlobalContext = None
+_GLOBAL_CONTEXT: _MultiprocessGlobalContext = None
 _PARENT_QUEUE_LISTENER: logging.handlers.QueueListener = None
 _QUEUE_HANDLER: logging.handlers.QueueHandler = None
 _CREATED_LOGGING_HANDLERS: set = set()
 _IS_GLOBAL_QUEUE_HANDLER_SETUP: bool = False
 
 
-def global_init_subprocess(global_context_from_parent):
-    global _GLOBAL_CONTEXT
-    _GLOBAL_CONTEXT = global_context_from_parent
-    _connect_root_logger_to_global_logging_queue()
-
-
 def global_init(logging_level="INFO", verbosity_level=0):
+    """Initialize the parent process global context for itself and
+    all its subprocesses.
+
+    The parent process should call this function once to initialize
+    global context used for global logging.
+
+    Args:
+        logging_level (:obj:`str`):The Python logging level.
+        verbosity_level (:obj:`int`): The verbosity level.
+    """
     global _GLOBAL_CONTEXT
     if _GLOBAL_CONTEXT:
         return
     # Create system global logging mp Queue.
-    _GLOBAL_CONTEXT = MultiprocessGlobalContext(
+    _GLOBAL_CONTEXT = _MultiprocessGlobalContext(
         logging_queue=multiprocessing.Queue(),
         logging_level=logging_level,
         verbosity_level=verbosity_level,
     )
 
 
-def get_process_pool_exec_init_func():
-    return global_init_subprocess
+def set_verbosity_level(level):
+    """Set the global verbosity level. The verbosity level's meaning
+    is determined by the application's interpretation of it.
+
+    Args:
+        level (int): The verbosity level.
+
+    Raises:
+        GlobalContextNotSet: Raised if :func:`global_init` has not been called.
+    """
+    global_init()
+    if not _GLOBAL_CONTEXT:
+        raise GlobalContextNotSet()
+    _GLOBAL_CONTEXT.global_verbosity_level = int(level)
 
 
-def get_process_pool_exec_init_args():
+def get_verbosity_level() -> int:
+    """Get the current global verbosity level. The verbosity level's meaning
+    is determined by the application's interpretation of it.
+
+    Raises:
+        GlobalContextNotSet: Raised if :func:`global_init` has not been called.
+
+    Returns:
+        int: The verbosity level.
+    """
+    global_init()
+    if not _GLOBAL_CONTEXT:
+        raise GlobalContextNotSet()
+    return _GLOBAL_CONTEXT.global_verbosity_level
+
+
+def _global_init_subprocess(
+    global_context_from_parent: _MultiprocessGlobalContext
+):
+    """Called as part of subprocess initialization.
+
+    Args:
+        global_context_from_parent (_type_): _description_
+    """
+    global _GLOBAL_CONTEXT
+    _GLOBAL_CONTEXT = global_context_from_parent
+    _connect_root_logger_to_global_logging_queue()
+
+
+def get_process_pool_exec_init_func(
+) -> Callable[[_MultiprocessGlobalContext], None]:
+    """Get the function to pass as `initializer' to
+    `concurrent.futures.ProcessPoolExecutor`.
+
+    This function would typically be used along with the
+    :func:`get_process_pool_exec_init_args` function when initializing a
+    `concurrent.futures.ProcessPoolExecutor`.
+
+    Example usage:
+
+    .. code-block:: python
+
+        ppe = ProcessPoolExecutor(
+            max_workers=max_workers_each,
+            initializer=get_process_pool_exec_init_func():,
+            initargs=get_process_pool_exec_init_args(),
+        )
+
+    Returns:
+        :obj:`Callable`: An initialization function called by a subprocess.
+    """
+    return _global_init_subprocess
+
+
+def get_process_pool_exec_init_args(
+) -> tuple[_MultiprocessGlobalContext]:
+    """Get the value to pass as `initargs' to
+    `concurrent.futures.ProcessPoolExecutor`.
+
+    This function would typically be used along with the
+    :func:`get_process_pool_exec_init_func` function when initializing a
+    `concurrent.futures.ProcessPoolExecutor`.
+
+    Example usage:
+
+    .. code-block:: python
+
+        ppe = ProcessPoolExecutor(
+            max_workers=max_workers_each,
+            initializer=get_process_pool_exec_init_func():,
+            initargs=get_process_pool_exec_init_args(),
+        )
+
+    Returns:
+        object: An argument for the subprocess initialization function.
+            The caller need not concern itself with its type/context.
+    """
     return (_GLOBAL_CONTEXT,)
 
 
-def track_logging_handler(*handlers):
+def _track_logging_handler(*handlers):
     _CREATED_LOGGING_HANDLERS.update(handlers)
 
 
-def untrack_logging_handler(*handlers):
+def _untrack_logging_handler(*handlers):
     untracked = []
     for h in handlers:
         if h in _CREATED_LOGGING_HANDLERS:
@@ -162,26 +282,28 @@ def untrack_logging_handler(*handlers):
     return untracked
 
 
-def start_global_queue_listener(*logging_handlers):
+def _start_global_queue_listener(*logging_handlers):
     global _PARENT_QUEUE_LISTENER
     if not _GLOBAL_CONTEXT:
         raise GlobalContextNotSet(f"global_context not initialized.")
     if _PARENT_QUEUE_LISTENER:
-        raise QueueListenerAlreadyStarted(f"parent_queue_listener already started.")
+        raise QueueListenerAlreadyStarted(
+            f"parent_queue_listener already started."
+        )
     _PARENT_QUEUE_LISTENER = logging.handlers.QueueListener(
         _GLOBAL_CONTEXT.global_logging_queue, *logging_handlers
     )
-    track_logging_handler(*logging_handlers)
+    _track_logging_handler(*logging_handlers)
     _PARENT_QUEUE_LISTENER.start()
 
 
-def stop_global_queue_listener():
+def _stop_global_queue_listener():
     global _PARENT_QUEUE_LISTENER
     if not _PARENT_QUEUE_LISTENER:
         raise QueueListenerNotStarted(f"parent_queue_listener not started.")
     p = _PARENT_QUEUE_LISTENER
 
-    untracked_handlers = untrack_logging_handler(*p.handlers)
+    untracked_handlers = _untrack_logging_handler(*p.handlers)
 
     _PARENT_QUEUE_LISTENER = None
     p.stop()
@@ -191,15 +313,14 @@ def stop_global_queue_listener():
 
 
 def switch_to_non_queued_logging():
-    """Switch to non-queued logging which is also logging
-    without latency which is useful for certain commands that
-    have the potential to interact with the user at the
-    command-line, where logging latency can be problematic
-    with interleaved with non-logging I/O.
+    """Switch to non-queued logging which is also logging without latency which
+    is useful for certain commands that have the potential to interact with the
+    user at the command-line, where logging latency can be problematic with
+    interleaved with non-logging I/O.
     """
     # pylint: disable=broad-except
     try:
-        handlers = stop_global_queue_listener()
+        handlers = _stop_global_queue_listener()
     except Exception:
         return
     # Transfer handlers relating to queued listener output
@@ -224,12 +345,13 @@ def _connect_root_logger_to_global_logging_queue():
 
 
 def remove_root_stream_handlers():
-    """Remove logging.StreamHandler handlers from root
-    logger. This helps to avoid double-logging output
-    to console once normal atbu logging infra is setup.
-    When doing this, we do not want to touch handlers
-    added by pytest etc.
+    """Remove `logging.StreamHandler` handlers from the root logger.
+
+    This can be used for re-initializing logging and it can help to avoid
+    double-logging output to console by blindly adding handlers without removing
+    existing handlers.
     """
+
     # pylint: disable=unidiomatic-typecheck
 
     # The following will not work...
@@ -252,6 +374,11 @@ def remove_root_stream_handlers():
 
 
 def remove_created_logging_handlers():
+    """Remove any handlers specifically added by this module, but not any
+    others.
+
+    This can be used for re-initializing logging.
+    """
     all_loggers = [logging.root] + [
         logging.getLogger(name)
         for name in logging.root.manager.loggerDict  # pylint: disable=no-member
@@ -260,10 +387,42 @@ def remove_created_logging_handlers():
         for h in l.handlers:
             if h in _CREATED_LOGGING_HANDLERS:
                 l.handlers.remove(h)
-                untrack_logging_handler(h)
+                _untrack_logging_handler(h)
 
 
-def initialize_logging(logfile, loglevel, verbosity_level, log_console_detail):
+def initialize_logging(
+    logfile,
+    loglevel,
+    verbosity_level,
+    log_console_detail
+):
+    """Initialize global multiprocessing shared logging.
+
+    Once initialized, this parent process, and all its subprocesses, will
+    ultimately log to this parent process's handler, typically outputting to the
+    console and, if specified on the command line, a log file.
+
+    Use :func:`deinitialize_logging` to de-initialize before the application
+    exits.
+
+    Args:
+        logfile (str): The path to a log file, if any. If None, do not log
+            to file.
+        loglevel (str): The Python logging level.
+        verbosity_level (int): The verbosity level. This should default to zero.
+            The meaning of added verbosity for values greater than zero is
+            app-defined by the process/subprocess calling
+            :func:`get_verbosity_level` and taking desired action, often to log
+            more than otherwise at the given Python logging level.
+        log_console_detail (bool): If True, prefix console output with detailed
+            timestamps and other information otherwise relegated to the logfile
+            output.
+
+    Raises:
+        GlobalContextNotSet: The `global_init` or subprocess initialization
+            function :func:`get_process_pool_exec_init_func` was not
+            specified/called.
+    """
     if not _GLOBAL_CONTEXT:
         raise GlobalContextNotSet()
     file_log_level = logging.DEBUG
@@ -304,30 +463,25 @@ def initialize_logging(logfile, loglevel, verbosity_level, log_console_detail):
         file_handler.setFormatter(detailed_formatter)
         handlers += (file_handler,)
 
-    start_global_queue_listener(*handlers)
-
-
-def set_verbosity_level(level):
-    global_init()
-    if not _GLOBAL_CONTEXT:
-        raise GlobalContextNotSet()
-    _GLOBAL_CONTEXT.global_verbosity_level = int(level)
-
-
-def get_verbosity_level() -> int:
-    global_init()
-    if not _GLOBAL_CONTEXT:
-        raise GlobalContextNotSet()
-    return _GLOBAL_CONTEXT.global_verbosity_level
+    _start_global_queue_listener(*handlers)
 
 
 def deinitialize_logging():
-    stop_global_queue_listener()
+    """Teardown logging initialized via :func:`initialize_logging`.
+
+    This is often called as part of process exit/cleanup.
+    """
+    _stop_global_queue_listener()
     remove_created_logging_handlers()
 
 
 def initialize_logging_basic():
-    """Setup basic used during before command line processing and
-    primary logging setup established.
+    """Setup basic logging without having to specify any detailed
+    setup parameters.
+
+    Command line arguments often specify the details of the type of
+    logging/verbosity desired by a user. In such cases, this can be
+    used early during app statrtup until such time as full logging
+    setup can proceed.
     """
     logging.basicConfig(level=logging.INFO, format="%(message)s")
