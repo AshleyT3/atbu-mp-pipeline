@@ -18,16 +18,23 @@ import subprocess
 
 our_dir = pathlib.Path(__file__).parent
 sys.path.insert(0, (our_dir / "src/atbu/mp_pipeline").resolve().as_posix())
+
 static_subdir = our_dir / "_static"
 static_subdir.mkdir(exist_ok=True)
 
-# Remove apidocs/* files which are not needed.
-# This avoids warnings without :orhpan:.
+# Remove apidocs/* files created by sphinx-apidoc which are not needed.
+# This avoids warnings without the need to insert :orhpan:.
 apidocs_subdir = our_dir / "apidocs"
+
+# Remove apidocs/modules.rst
 apidocs_modules_rst_path = apidocs_subdir / "modules.rst"
+if apidocs_modules_rst_path.exists():
+    apidocs_modules_rst_path.unlink()
+
+# Remove apidocs/atbu.rst
 apidocs_atbu_rst_path = apidocs_subdir / "atbu.rst"
-apidocs_modules_rst_path.unlink(missing_ok=True)
-apidocs_atbu_rst_path.unlink(missing_ok=True)
+if apidocs_atbu_rst_path.exists():
+    apidocs_atbu_rst_path.unlink()
 
 # Detect if we are running on read the docs
 is_running_on_rtd = os.environ.get('READTHEDOCS', '').lower() == 'true'

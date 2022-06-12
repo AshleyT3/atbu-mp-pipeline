@@ -18,9 +18,9 @@ from pathlib import Path
 import setuptools
 
 # read the contents of your README file
-this_dir = Path(__file__).parent
-docs_dir = this_dir / "docs"
-long_description = (docs_dir / "README.md").read_text()
+this_dir = Path(__file__).parent.absolute()
+readme_md_path = this_dir / "README.md"
+long_description = readme_md_path.read_text()
 
 setuptools.setup(
     name="atbu-mp-pipeline-pkg",

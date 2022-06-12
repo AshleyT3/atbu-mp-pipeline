@@ -8,14 +8,14 @@
       :caption: Contents:
 
 
-atbu-mp-pipeline
-================
+ATBU Multiprocessing Pipeline
+=============================
 
 .. toctree::
    :glob:
    :maxdepth: 3
 
-   README.md
+   README_md_link
    api
 
 Indices and tables
