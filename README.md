@@ -5,6 +5,8 @@ The atbu.mp_pipeline package uses Python multiprocessing capabilities to support
 The atbu.mp_pipeline package is currently used by the following project for supporting a backup compression pipeline stage:
 - [ATBU Backup & Persistent File Information](https://github.com/AshleyT3/atbu) utility package (atbu-pkg).
 
+Documentation: https://atbu-mp-pipeline.readthedocs.io/en/latest/
+
 ## Setup
 To install atbu-common-pkg:
 
