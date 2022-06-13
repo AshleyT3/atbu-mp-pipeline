@@ -625,6 +625,14 @@ class PipelineWorkItem:
                 beyond the exception, where the pipeline processing code then
                 passes `self` as the `wi` argument for use as needed.
         """
+
+        if _is_very_verbose_logging():
+            logging.debug(
+                f"stage_complete: "
+                f"stage_num={stage_num} "
+                f"wi={str(wi)} ex={str(ex)}"
+            )
+
         if ex is not None:
             self.append_exception(ex)
         if wi.is_failed:
@@ -638,21 +646,6 @@ class PipelineWorkItem:
             for k, v in wi.__dict__.items():
                 if k not in PipelineWorkItem._OUR_ATTRIBUTES:
                     self.__dict__[k] = v
-
-
-@dataclass(eq=True, frozen=True)
-class _WorkItemStageRunCtx:
-    """A PipelineWorkItem-to-Future relationship context.
-
-    A stage may execute one or two `Future` instances. Instances of this
-    class represent a relationship of work item to `Future`.
-    """
-    cur_stage: int
-    fut: Future
-    wi: PipelineWorkItem
-
-    def __str__(self) -> str:
-        return f"cur_stage={self.cur_stage} wi={str(self.wi)} fut={str(self.fut)}"
 
 
 class PipelineStage:
@@ -757,6 +750,21 @@ class ThreadPipelineStage(PipelineStage):
     @property
     def is_subprocess(self):
         return False
+
+
+@dataclass(eq=True, frozen=True)
+class _WorkItemStageRunCtx:
+    """A PipelineWorkItem-to-Future relationship context.
+
+    A stage may execute one or two `Future` instances. Instances of this
+    class represent a relationship of work item to `Future`.
+    """
+    cur_stage: int
+    fut: Future
+    wi: PipelineWorkItem
+
+    def __str__(self) -> str:
+        return f"cur_stage={self.cur_stage} wi={str(self.wi)} fut={str(self.fut)}"
 
 
 class MultiprocessingPipeline:
@@ -901,9 +909,6 @@ class MultiprocessingPipeline:
                 continue
             wi.append_exception(ex)
             wifut.set_exception(ex)
-
-    def _get_running_wi_count(self):
-        return len(self._running_wi_contexts)
 
     def _is_wi_still_running(
         self,
@@ -1136,47 +1141,120 @@ class MultiprocessingPipeline:
         if not self._is_wi_still_running(wi=wi) and wi.cur_stage >= self.num_stages:
             self._set_wi_to_finished(wi)
 
+    def _get_all_wi_futs(self) -> tuple[list[Future],list[Future]]:
+        """Get all finished and running Future instances.
+
+        Returns:
+            tuple[list[Future],list[Future]]: tuple (done_futs, running_futs)
+                where done_futs will only contain Future instances for work
+                items where all Future instances for the work item are finished.
+
+                If a work item has any unfinished Future instances, only those
+                unfinished Future instances are returned as pending, where the
+                already completed Futures are not returned at all until some
+                later call when all Future instances for the work item are
+                finished.
+
+                The done_futs, if it contains multiple Future instances for a
+                given work item, the Future instances are in stage number order
+                which can help the caller process the Future instances from
+                lowest to highest stage number.
+        """
+        done_futs: list[Future] = []
+        pending_futs: list[Future] = []
+        # For each work item, sort its contexts by stage number, categorize
+        # Future instances in stage order into the done/running lists.
+        for wi_contexts in self._running_wi_contexts.values():
+
+            #
+            # If there is more than one item in wi_contexts, they are in stage
+            # number order.
+            #
+            ctx_futs = [ctx.fut for ctx in wi_contexts]
+            ctx_done_futs = [fut for fut in ctx_futs if fut.done()]
+            ctx_pending_futs = [fut for fut in ctx_futs if fut not in ctx_done_futs]
+
+            #
+            # For done Future instances, close any pipe connections.
+            #
+            list(map(
+                lambda fut: self._cleanup_pipe_connections(done_fut=fut),
+                ctx_done_futs
+            ))
+
+            #
+            # Only return Future instances for this work item if all pending
+            # Future instances for that work item are finished.
+            #
+            if not ctx_pending_futs:
+                # All pending Future instances for the work item are finished.
+                done_futs.extend(ctx_futs)
+            else:
+                # One or more Future instances for the work item are still
+                # running.
+                pending_futs.extend(ctx_pending_futs)
+        return done_futs, pending_futs
+
     def _pl_worker(self):
         try:
             is_shutdown: bool = False
             while not is_shutdown:
 
-                #
-                # Check for new work.
-                #
-                wi, is_shutdown = self._get_queued_wi()
-                if is_shutdown:
-                    break
+                # Determine if any Future instances are finished.
+                done_futs, pending_futs = self._get_all_wi_futs()
+                self._renew_input_queue_future()
+                if self._input_queue_fut.done():
+                    done_futs.append(self._input_queue_fut)
 
-                if wi is not None:
+                if _is_very_verbose_logging():
+                    wait_str = "no wait" if done_futs else "wait"
+                    logging.debug(
+                        f"_pl_worker: {wait_str}: "
+                        f"done_futs={len(done_futs)} "
+                        f"pending_futs={len(pending_futs)} "
+                        f"input={self._input_queue_fut.done()}"
+                    )
+
+                while not done_futs:
                     #
-                    # New work available.
+                    # No Future instances are currently finished.
+                    # Wait on all pending Futures plus the new work input queue.
                     #
-                    wi_needing_attention = set([wi])
-                else:
-                    #
-                    # Wait on all pending work plus
-                    # the new work input queue.
-                    #
-                    all_futs = set(self._plfut_to_wi)
-                    self._renew_input_queue_future()
-                    all_futs.add(self._input_queue_fut)
-                    done_futs, _ = concurrent.futures.wait(
-                        fs=all_futs, return_when=FIRST_COMPLETED
+                    pending_futs.append(self._input_queue_fut)
+                    concurrent.futures.wait(
+                        fs=pending_futs, return_when=FIRST_COMPLETED
                     )
 
                     #
-                    # Something completed, gather list.
+                    # Instead of using the wait results, get our own list
+                    # that filters out Futures for work items which still
+                    # have other Future instances pending.
                     #
-                    wi_needing_attention = set()
-                    for done_fut in done_futs:
-                        self._cleanup_pipe_connections(done_fut=done_fut)
-                        wi, is_sd = self._handle_completed_fut(done_fut=done_fut)
-                        is_shutdown = is_shutdown or is_sd
-                        if wi is not None:
-                            wi_needing_attention.add(wi)
-                    if is_shutdown:
-                        break
+                    done_futs, pending_futs = self._get_all_wi_futs()
+                    if self._input_queue_fut.done():
+                        done_futs.append(self._input_queue_fut)
+
+                    if _is_very_verbose_logging():
+                        logging.debug(
+                            f"_pl_worker: after wait: "
+                            f"done_futs={len(done_futs)} "
+                            f"pending_futs={len(pending_futs)} "
+                            f"input={self._input_queue_fut.done()}"
+                        )
+
+                #
+                # Something completed, gather list.
+                #
+                wi_needing_attention = set([])
+                for done_fut in done_futs:
+                    wi, is_sd = self._handle_completed_fut(
+                        done_fut=done_fut
+                    )
+                    is_shutdown = is_shutdown or is_sd
+                    if wi is not None:
+                        wi_needing_attention.add(wi)
+                if is_shutdown:
+                    break
 
                 #
                 # Check completed results...
@@ -1319,7 +1397,9 @@ class MultiprocessingPipeline:
         # Submit work item to writer stage.
         #
         next_stage = self._stages[wi.cur_stage]
-        fut_w = self._submit_to_stage(stage=next_stage, wi=wi, pipe_conn=conn_w)
+        fut_w = self._submit_to_stage(
+            stage=next_stage, wi=wi, pipe_conn=conn_w
+        )
 
         #
         # Submit work item to reader stage.
