@@ -24,7 +24,7 @@ long_description = readme_md_path.read_text()
 
 setuptools.setup(
     name="atbu-mp-pipeline-pkg",
-    version="0.0.4",
+    version="0.0.5",
     author="Ashley R. Thomas",
     author_email="ashley.r.thomas.701@gmail.com",
     description= (
