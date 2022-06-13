@@ -322,6 +322,7 @@ class ProducerConsumerWorkItem(PipelineWorkItem):
         self.producer_data = None # What producer sent.
         self.producer_bytes_written = None
         self.consumer_data = None # What consumer received
+        self.last_observed_stage_number = -1 # For validation of stage num order.
 
     def stage_complete(
         self,
@@ -334,6 +335,10 @@ class ProducerConsumerWorkItem(PipelineWorkItem):
             wi=wi,
             ex=ex,
         )
+
+        assert self.last_observed_stage_number < stage_num
+        self.last_observed_stage_number = stage_num
+
         if not wi.is_failed:
             if stage_num == 0:
                 self.producer_data = wi.producer_data
@@ -421,6 +426,7 @@ def test_mp_pipeline_producer_consumer(tmp_path: Path):
     assert len(done) == 2
     for f in done:
         r_wi: ProducerConsumerWorkItem = f.result()
+        assert r_wi.last_observed_stage_number == 1
         assert not r_wi.is_failed
         assert r_wi.producer_bytes_written == 10
         assert r_wi.producer_data == r_wi.consumer_data

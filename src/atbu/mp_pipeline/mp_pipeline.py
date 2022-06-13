@@ -1177,10 +1177,8 @@ class MultiprocessingPipeline:
             #
             # For done Future instances, close any pipe connections.
             #
-            list(map(
-                lambda fut: self._cleanup_pipe_connections(done_fut=fut),
-                ctx_done_futs
-            ))
+            for fut in ctx_done_futs:
+                self._cleanup_pipe_connections(done_fut=fut)
 
             #
             # Only return Future instances for this work item if all pending
