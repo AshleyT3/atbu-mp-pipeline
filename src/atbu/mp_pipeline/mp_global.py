@@ -458,7 +458,10 @@ def initialize_logging(
     handlers += (stream_handler,)
 
     if logfile is not None:
-        file_handler = logging.FileHandler(logfile)
+        file_handler = logging.FileHandler(
+            filename=logfile,
+            encoding="utf-8"
+        )
         file_handler.setLevel(file_log_level)
         file_handler.setFormatter(detailed_formatter)
         handlers += (file_handler,)
