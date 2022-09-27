@@ -17,11 +17,11 @@
 import os
 import time
 from pathlib import Path
+import random
 from random import randint
 import logging
 import concurrent.futures
 from concurrent.futures import ALL_COMPLETED, Future, ProcessPoolExecutor
-from turtle import st
 import pytest
 
 from atbu.mp_pipeline.exception import PipeConnectionAlreadyEof
@@ -33,7 +33,6 @@ from atbu.mp_pipeline.mp_pipeline import (
     ThreadPipelineStage,
     PipelineWorkItem,
 )
-from .common_helpers import establish_random_seed
 
 LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +43,19 @@ def setup_module(module):
 
 def teardown_module(module):
     pass
+
+
+def establish_random_seed(tmp_path, random_seed: bytes = None):
+    if random_seed is None:
+        random_seed = os.urandom(4)
+    random_seed_file = tmp_path.joinpath("random_seed.txt")
+    if not random_seed_file.is_file():
+        random_seed_file.write_text(random_seed.hex())
+    else:
+        # Use existing seed file.
+        random_seed = bytes.fromhex(random_seed_file.read_text())
+    random.seed(random_seed)
+    return random_seed
 
 
 def queue_worker_func(parm_top_secret, parent_pid):
