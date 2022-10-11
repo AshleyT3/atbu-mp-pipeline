@@ -26,6 +26,7 @@ from typing import Callable
 from atbu.common.exception import (
     QueueListenerNotStarted,
     QueueListenerAlreadyStarted,
+    InvalidStateError,
 )
 
 from .exception import (
@@ -73,7 +74,7 @@ class ProcessThreadContextMixin:
 
 class _MultiprocessGlobalContext:
     """Initialize a global context instance.
-    
+
     MP global context. WARNING: Do not add any member
     variables that cannot be pickled, or generally avoid
     doing so if sharing is not needed.
@@ -389,6 +390,7 @@ def remove_created_logging_handlers():
                 l.handlers.remove(h)
                 _untrack_logging_handler(h)
 
+_LAST_INITIALIZE_ARGS = None
 
 def initialize_logging(
     logfile,
@@ -423,6 +425,8 @@ def initialize_logging(
             function :func:`get_process_pool_exec_init_func` was not
             specified/called.
     """
+    global _LAST_INITIALIZE_ARGS
+    _LAST_INITIALIZE_ARGS = locals()
     if not _GLOBAL_CONTEXT:
         raise GlobalContextNotSet()
     file_log_level = logging.DEBUG
@@ -476,6 +480,20 @@ def deinitialize_logging():
     """
     _stop_global_queue_listener()
     remove_created_logging_handlers()
+
+
+def reinitialize_logging():
+    """Reinitialize logging after using switch_to_non_queued_logging().
+
+    Raises:
+        InvalidStateError: Raised if initialize_logging() has never been called.
+    """
+    if _LAST_INITIALIZE_ARGS is None:
+        raise InvalidStateError(
+            "The initialize_logging() function must be called at least once "
+            "before reinitialize_logging() can be used."
+        )
+    initialize_logging(**_LAST_INITIALIZE_ARGS)
 
 
 def initialize_logging_basic():
